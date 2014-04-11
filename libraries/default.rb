@@ -77,12 +77,12 @@ def get_mon_addresses()
       mons << node
     end
 
-    mons += get_mon_nodes()
+    mons += get_mon_nodes("datacenter:#{node['datacenter']}")
     if is_crowbar?
       mon_ips = mons.map { |node| Chef::Recipe::Barclamp::Inventory.get_network_by_type(node, "admin").address }
     else
-      if node['ceph']['config']['global'] && node['ceph']['config']['global']['public network']
-        mon_ips = mons.map { |nodeish| find_node_ip_in_network(node['ceph']['config']['global']['public network'], nodeish) }
+      if node['ceph']['config']['global'] && node['ceph']['config']['global']['public_network']
+        mon_ips = mons.map { |nodeish| find_node_ip_in_network(node['ceph']['config']['global']['public_network'], nodeish) }
       else
         mon_ips = mons.map { |node| node['ipaddress'] + ":6789" }
       end
