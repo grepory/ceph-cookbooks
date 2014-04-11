@@ -1,7 +1,7 @@
 #
 # Author:: Kyle Bader <kyle.bader@dreamhost.com>
 # Cookbook Name:: ceph
-# Recipe:: default
+# Recipe:: cephfs
 #
 # Copyright 2011, DreamHost Web Hosting
 #
@@ -17,37 +17,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-packages = []
+include_recipe 'ceph::conf'
 
-case node['platform_family']
-when 'debian'
-  packages = %w(
-    ceph
-    ceph-common
-  )
+name = 'cephfs'
+client_name = "cephfs.#{node['hostname']}"
+filename = "/etc/ceph/ceph.client.#{client_name}.secret"
 
-  if node['ceph']['install_debug']
-    packages_dbg = %w(
-      ceph-dbg
-      ceph-common-dbg
-    )
-    packages += packages_dbg
-  end
-when 'rhel', 'fedora'
-  packages = %w(
-    ceph
-  )
-
-  if node['ceph']['install_debug']
-    packages_dbg = %w(
-      ceph-debug
-    )
-    packages += packages_dbg
-  end
+ceph_client name do
+  filename filename
+  caps('mon' => 'allow r', 'osd' => 'allow rw', 'mds' => 'allow')
+  as_keyring false
 end
 
-packages.each do |pkg|
-  package pkg do
-    action :install
-  end
+mons = mon_addresses.join(',') + ':/'
+
+directory node['ceph']['cephfs_mount']
+
+mount node['ceph']['cephfs_mount'] do
+  fstype 'ceph'
+  device mons
+  options "_netdev,name=#{client_name},secretfile=#{filename}"
+  dump 0
+  pass 0
+  action [:mount, :enable]
+  not_if { mons.empty? }
 end

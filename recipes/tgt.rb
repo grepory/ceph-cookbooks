@@ -1,7 +1,7 @@
 #
 # Author:: Kyle Bader <kyle.bader@dreamhost.com>
 # Cookbook Name:: ceph
-# Recipe:: default
+# Recipe:: radosgw
 #
 # Copyright 2011, DreamHost Web Hosting
 #
@@ -17,37 +17,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-packages = []
+node.default['ceph']['extras_repo'] = true
 
 case node['platform_family']
 when 'debian'
   packages = %w(
-    ceph
-    ceph-common
+    tgt
   )
-
-  if node['ceph']['install_debug']
-    packages_dbg = %w(
-      ceph-dbg
-      ceph-common-dbg
-    )
-    packages += packages_dbg
-  end
 when 'rhel', 'fedora'
   packages = %w(
-    ceph
+    scsi-target-utils
   )
-
-  if node['ceph']['install_debug']
-    packages_dbg = %w(
-      ceph-debug
-    )
-    packages += packages_dbg
-  end
 end
 
 packages.each do |pkg|
   package pkg do
-    action :install
+    action :upgrade
   end
+end
+
+include_recipe 'ceph::conf'
+# probably needs the key
+service 'tgt' do
+  if node['platform'] == 'ubuntu'
+    # The ceph version of tgt does not provide an Upstart script
+    provider Chef::Provider::Service::Init::Debian
+    service_name 'tgt'
+  else
+    service_name 'tgt'
+  end
+  supports :restart => true
+  action [:enable, :start]
 end

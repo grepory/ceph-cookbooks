@@ -14,41 +14,43 @@
 #  different and are created in
 #  /var/lib/ceph/bootstrap-{osd,mds}/ceph.keyring
 
-include_recipe "ceph::default"
-include_recipe "ceph::conf"
+include_recipe 'ceph::default'
+include_recipe 'ceph::conf'
 
-service_type = node["ceph"]["mon"]["init_style"]
+service_type = node['ceph']['mon']['init_style']
 
-directory "/var/run/ceph" do
-  owner "root"
-  group "root"
+node.default['ceph']['is_mon'] = true
+
+directory '/var/run/ceph' do
+  owner 'root'
+  group 'root'
   mode 00755
   recursive true
   action :create
 end
 
 directory "/var/lib/ceph/mon/ceph-#{node["hostname"]}" do
-  owner "root"
-  group "root"
+  owner 'root'
+  group 'root'
   mode 00755
   recursive true
   action :create
 end
 
-# TODO cluster name
+# TODO: cluster name
 cluster = 'ceph'
 
-unless File.exists?("/var/lib/ceph/mon/ceph-#{node["hostname"]}/done")
+unless File.exist?("/var/lib/ceph/mon/ceph-#{node["hostname"]}/done")
   keyring = "#{Chef::Config[:file_cache_path]}/#{cluster}-#{node['hostname']}.mon.keyring"
 
-  monitor_secret = if node['ceph']['encrypted_data_bags']
-    secret = Chef::EncryptedDataBagItem.load_secret(node["ceph"]["mon"]["secret_file"])
-    Chef::EncryptedDataBagItem.load("ceph", "mon", secret)["secret"]
+  if node['ceph']['encrypted_data_bags']
+    secret = Chef::EncryptedDataBagItem.load_secret(node['ceph']['mon']['secret_file'])
+    monitor_secret = Chef::EncryptedDataBagItem.load('ceph', 'mon', secret)['secret']
   else
-    node["ceph"]["monitor-secret"]
+    monitor_secret = node['ceph']['monitor-secret']
   end
 
-  execute "format as keyring" do
+  execute 'format as keyring' do
     command "ceph-authtool '#{keyring}' --create-keyring --name=mon. --add-key='#{monitor_secret}' --cap mon 'allow *'"
     creates "#{Chef::Config[:file_cache_path]}/#{cluster}-#{node['hostname']}.mon.keyring"
   end
@@ -57,55 +59,54 @@ unless File.exists?("/var/lib/ceph/mon/ceph-#{node["hostname"]}/done")
     command "ceph-mon --mkfs -i #{node['hostname']} --keyring '#{keyring}'"
   end
 
-  ruby_block "finalise" do
+  ruby_block 'finalise' do
     block do
-      ["done", service_type].each do |ack|
-        File.open("/var/lib/ceph/mon/ceph-#{node["hostname"]}/#{ack}", "w").close()
+      ['done', service_type].each do |ack|
+        ::File.open("/var/lib/ceph/mon/ceph-#{node["hostname"]}/#{ack}", 'w').close
       end
     end
   end
 end
 
-if service_type == "upstart"
-  service "ceph-mon" do
+if service_type == 'upstart'
+  service 'ceph-mon' do
     provider Chef::Provider::Service::Upstart
     action :enable
   end
-  service "ceph-mon-all" do
+  service 'ceph-mon-all' do
     provider Chef::Provider::Service::Upstart
     supports :status => true
-    action [ :enable, :start ]
+    action [:enable, :start]
   end
 end
 
-service "ceph_mon" do
+service 'ceph_mon' do
   case service_type
-  when "upstart"
-    service_name "ceph-mon-all-starter"
+  when 'upstart'
+    service_name 'ceph-mon-all-starter'
     provider Chef::Provider::Service::Upstart
   else
-    service_name "ceph"
+    service_name 'ceph'
   end
   supports :restart => true, :status => true
-  action [ :enable, :start ]
+  action [:enable, :start]
 end
 
-get_mon_addresses().each do |addr|
+mon_addresses.each do |addr|
   execute "peer #{addr}" do
     command "ceph --admin-daemon '/var/run/ceph/ceph-mon.#{node['hostname']}.asok' add_bootstrap_peer_hint #{addr}"
     ignore_failure true
   end
 end
 
-# The key is going to be automatically
-# created,
-# We store it when it is created
-unless node['ceph']['encrypted_data_bags']
-  ruby_block "get osd-bootstrap keyring" do
+# The key is going to be automatically created, We store it when it is created
+# If we're storing keys in encrypted data bags, then they've already been generated above
+if use_cephx? && !node['ceph']['encrypted_data_bags']
+  ruby_block 'get osd-bootstrap keyring' do
     block do
-      run_out = ""
+      run_out = ''
       while run_out.empty?
-        run_out = Mixlib::ShellOut.new("ceph auth get-key client.bootstrap-osd").run_command.stdout.strip
+        run_out = Mixlib::ShellOut.new('ceph auth get-key client.bootstrap-osd').run_command.stdout.strip
         sleep 2
       end
       node.override['ceph']['bootstrap_osd_key'] = run_out

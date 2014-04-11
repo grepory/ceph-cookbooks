@@ -1,26 +1,25 @@
 require 'ipaddr'
 require 'json'
 
-def is_crowbar?()
-  return defined?(Chef::Recipe::Barclamp) != nil
+def crowbar?
+  !defined?(Chef::Recipe::Barclamp).nil?
 end
 
-def get_mon_nodes(extra_search=nil)
-  if is_crowbar?
+def get_mon_nodes(extra_search = nil)
+  if crowbar?
     mon_roles = search(:role, 'name:crowbar-* AND run_list:role\[ceph-mon\]')
-    if not mon_roles.empty?
-      search_string = mon_roles.map { |role_object| "roles:"+role_object.name }.join(' OR ')
+    unless mon_roles.empty?
+      search_string = mon_roles.map { |role_object| 'roles:' + role_object.name }.join(' OR ')
       search_string = "(#{search_string}) AND ceph_config_environment:#{node['ceph']['config']['environment']}"
     end
   else
-    search_string = "roles:ceph-mon AND chef_environment:#{node.chef_environment}"
+    search_string = "ceph_is_mon:true AND chef_environment:#{node.chef_environment}"
   end
 
-  if not extra_search.nil?
+  unless extra_search.nil?
     search_string = "(#{search_string}) AND (#{extra_search})"
   end
-  mons = search(:node, search_string)
-  return mons
+  search(:node, search_string)
 end
 
 # If public_network is specified
@@ -29,53 +28,47 @@ end
 # 1. We look if the network is IPv6 or IPv4
 # 2. We look for a route matching the network
 # 3. We grab the IP and return it with the port
-def find_node_ip_in_network(network, nodeish=nil)
+def find_node_ip_in_network(network, nodeish = nil)
   nodeish = node unless nodeish
   net = IPAddr.new(network)
-  nodeish["network"]["interfaces"].each do |iface|
-    if iface[1]["routes"].nil?
-      next
+  nodeish['network']['interfaces'].each do |iface, addrs|
+    addresses = addrs['addresses'] || []
+    addresses.each do |ip, params|
+      return ip_address_to_ceph_address(ip, params) if ip_address_in_network?(ip, params, net)
     end
-    if net.ipv4?
-      iface[1]["routes"].each_with_index do |route, index|
-        if iface[1]["routes"][index]["destination"] == network
-          return "#{iface[1]["routes"][index]["src"]}:6789"
-        end
-      end
-    else
-      # Here we are getting an IPv6. We assume that
-      # the configuration is stateful.
-      # For this configuration to not fail in a stateless
-      # configuration, you should run:
-      #  echo "0" > /proc/sys/net/ipv6/conf/*/use_tempaddr
-      # on each server, this will disabe temporary addresses
-      # See: http://en.wikipedia.org/wiki/IPv6_address#Temporary_addresses
-      iface[1]["routes"].each_with_index do |route, index|
-        if iface[1]["routes"][index]["destination"] == network
-          iface[1]["addresses"].each do |k,v|
-            if v["scope"] == "Global" and v["family"] == "inet6"
-              return "[#{k}]:6789"
-            end
-          end
-        end
-      end
-    end
+  end
+  nil
+end
+
+def ip_address_in_network?(ip, params, net)
+  if params['family'] == 'inet'
+    net.include?(ip) && params.key?('broadcast')     # is primary ip on iface
+  elsif params['family'] == 'inet6'
+    net.include?(ip)
+  else
+    false
   end
 end
 
-def get_mon_addresses()
+def ip_address_to_ceph_address(ip, params)
+  if params['family'].eql?('inet6')
+    return "[#{ip}]:6789"
+  elsif params['family'].eql?('inet')
+    return "#{ip}:6789"
+  end
+end
+
+def mon_addresses
   mon_ips = []
 
-  if File.exists?("/var/run/ceph/ceph-mon.#{node['hostname']}.asok")
-    mon_ips = get_quorum_members_ips()
+  if File.exist?("/var/run/ceph/ceph-mon.#{node['hostname']}.asok")
+    mon_ips = quorum_members_ips
   else
     mons = []
     # make sure if this node runs ceph-mon, it's always included even if
     # search is laggy; put it first in the hopes that clients will talk
     # primarily to local node
-    if node['roles'].include? 'ceph-mon'
-      mons << node
-    end
+    mons << node if node['ceph']['is_mon']
 
     mons += get_mon_nodes("datacenter:#{node['datacenter']}")
     if is_crowbar?
@@ -84,38 +77,68 @@ def get_mon_addresses()
       if node['ceph']['config']['global'] && node['ceph']['config']['global']['public_network']
         mon_ips = mons.map { |nodeish| find_node_ip_in_network(node['ceph']['config']['global']['public_network'], nodeish) }
       else
-        mon_ips = mons.map { |node| node['ipaddress'] + ":6789" }
+        mon_ips = mons.map { |node| node['ipaddress'] + ':6789' }
       end
     end
   end
-  return mon_ips.uniq
+  mon_ips.reject { |m| m.nil? }.uniq
 end
 
-def get_quorum_members_ips()
-  mon_ips = []
-  mon_status = %x[ceph --admin-daemon /var/run/ceph/ceph-mon.#{node['hostname']}.asok mon_status]
-  raise 'getting quorum members failed' unless $?.exitstatus == 0
+def mon_secret
+  # find the monitor secret
+  mon_secret = ''
+  mons = get_mon_nodes
+  if !mons.empty?
+    mon_secret = mons[0]['ceph']['monitor-secret']
+  elsif mons.empty? && node['ceph']['monitor-secret']
+    mon_secret = node['ceph']['monitor-secret']
+  else
+    Chef::Log.warn('No monitor secret found')
+  end
+  mon_secret
+end
 
-  mons = JSON.parse(mon_status)['monmap']['mons']
+def quorum_members_ips
+  mon_ips = []
+  cmd = Mixlib::ShellOut.new("ceph --admin-daemon /var/run/ceph/ceph-mon.#{node['hostname']}.asok mon_status")
+  cmd.run_command
+  cmd.error!
+
+  mons = JSON.parse(cmd.stdout)['monmap']['mons']
   mons.each do |k|
     mon_ips.push(k['addr'][0..-3])
   end
-  return mon_ips
+  mon_ips
 end
 
-QUORUM_STATES = ['leader', 'peon']
-def have_quorum?()
-    # "ceph auth get-or-create-key" would hang if the monitor wasn't
-    # in quorum yet, which is highly likely on the first run. This
-    # helper lets us delay the key generation into the next
-    # chef-client run, instead of hanging.
-    #
-    # Also, as the UNIX domain socket connection has no timeout logic
-    # in the ceph tool, this exits immediately if the ceph-mon is not
-    # running for any reason; trying to connect via TCP/IP would wait
-    # for a relatively long timeout.
-    mon_status = %x[ceph --admin-daemon /var/run/ceph/ceph-mon.#{node['hostname']}.asok mon_status]
-    raise 'getting monitor state failed' unless $?.exitstatus == 0
-    state = JSON.parse(mon_status)['state']
-    return QUORUM_STATES.include?(state)
+QUORUM_STATES = %w(leader, peon)
+def quorum?
+  # "ceph auth get-or-create-key" would hang if the monitor wasn't
+  # in quorum yet, which is highly likely on the first run. This
+  # helper lets us delay the key generation into the next
+  # chef-client run, instead of hanging.
+  #
+  # Also, as the UNIX domain socket connection has no timeout logic
+  # in the ceph tool, this exits immediately if the ceph-mon is not
+  # running for any reason; trying to connect via TCP/IP would wait
+  # for a relatively long timeout.
+
+  cmd = Mixlib::ShellOut.new("ceph --admin-daemon /var/run/ceph/ceph-mon.#{node['hostname']}.asok mon_status")
+  cmd.run_command
+  cmd.error!
+
+  state = JSON.parse(cmd.stdout)['state']
+  QUORUM_STATES.include?(state)
+end
+
+# Cephx is on by default, but users can disable it.
+# type can be one of 3 values: cluster, service, or client.  If the value is none of the above, set it to cluster
+def use_cephx?(type = nil)
+  # Verify type is valid
+  type = 'cluster' if %w(cluster service client).index(type).nil?
+
+  # CephX is enabled if it's not configured at all, or explicity enabled
+  node['ceph']['config'].nil? ||
+    node['ceph']['config']['global'].nil? ||
+    node['ceph']['config']['global']["auth #{type} required"] == 'cephx'
 end
